@@ -1,6 +1,9 @@
 @echo off
-python -m venv .venv
-call .venv\Scripts\activate
-pip install -r requirements.txt
+cd /d "%~dp0"
+if not exist ".venv\Scripts\python.exe" (
+    python -m venv .venv
+)
+call ".venv\Scripts\activate.bat"
+python -m pip install -r requirements.txt
 python -m playwright install chromium
-streamlit run app.py
+python -m streamlit run app.py --server.port 8503

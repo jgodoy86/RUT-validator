@@ -1,15 +1,13 @@
 import base64
+import io
 import json
 import mimetypes
-import os
 import re
-import tempfile
-import io
 import unicodedata
 from dataclasses import dataclass
 from html import unescape
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 import cv2
@@ -98,7 +96,14 @@ def call_openai_structured(api_key: str, model: str, content: List[Dict[str, Any
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    resp = requests.post(OPENAI_RESPONSES_URL, headers=headers, json=payload, timeout=180)
+    try:
+        resp = requests.post(OPENAI_RESPONSES_URL, headers=headers, json=payload, timeout=180)
+    except requests.exceptions.RequestException as exc:
+        raise RuntimeError(
+            "No se pudo conectar con OpenAI. Revisa conexion a internet, firewall, antivirus, "
+            "VPN/proxy o permisos de salida hacia api.openai.com:443. "
+            f"Detalle tecnico: {exc}"
+        ) from exc
     if resp.status_code >= 400:
         raise RuntimeError(f"OpenAI API error {resp.status_code}: {resp.text[:2000]}")
     data = resp.json()
@@ -119,11 +124,10 @@ def render_file_to_images(file_bytes: bytes, filename: str, max_pages: int = 3, 
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
             images.append(img)
         return images
-    return [Image.open(tempfile.SpooledTemporaryFile()).convert("RGB")]
+    return [Image.open(io.BytesIO(file_bytes)).convert("RGB")]
 
 
 def image_bytes_to_pil(file_bytes: bytes) -> Image.Image:
-    import io
     return Image.open(io.BytesIO(file_bytes)).convert("RGB")
 
 
@@ -201,7 +205,9 @@ def is_safe_dian_url(url: str) -> bool:
         parsed = urlparse(url)
     except Exception:
         return False
-    return parsed.scheme in ("http", "https") and parsed.netloc.lower().endswith(DIAN_HOST_SUFFIX)
+    host = (parsed.hostname or "").lower().rstrip(".")
+    is_dian_host = host == DIAN_HOST_SUFFIX or host.endswith(f".{DIAN_HOST_SUFFIX}")
+    return parsed.scheme in ("http", "https") and is_dian_host
 
 
 def strip_html(html: str) -> str:
@@ -410,29 +416,53 @@ def validate_document_watermark(document_fields: Dict[str, Any]) -> Dict[str, An
     }
 
 
-def compare_results(document_extraction: Dict[str, Any], page_extraction: Dict[str, Any], qr_page_accessible: bool) -> Dict[str, Any]:
-    doc_fields = document_extraction.get("document_fields") or {}
-    page_fields = page_extraction.get("page_fields") or {}
-    watermark_validation = validate_document_watermark(doc_fields)
-    comparisons = compare_simple_fields(doc_fields, page_fields)
-    comparisons.append(compare_responsabilidades(doc_fields, page_fields))
-    comparisons.append({
+def build_watermark_comparison(watermark_validation: Dict[str, Any]) -> Dict[str, Any]:
+    return {
         "field": "marca_agua_documento",
         "document_value": watermark_validation.get("document_value"),
         "qr_page_value": None,
         "status": watermark_validation.get("status"),
         "message": watermark_validation.get("message"),
-    })
-    differences = [r for r in comparisons if r["status"] == "different"]
+    }
+
+
+def build_qr_page_comparison(qr_page_loaded: bool, qr_url: Optional[str]) -> Dict[str, Any]:
+    if qr_page_loaded:
+        return {
+            "field": "consulta_qr_dian",
+            "document_value": qr_url,
+            "qr_page_value": "La pagina DIAN cargo informacion util del RUT.",
+            "status": "match",
+            "message": "El QR abre una consulta DIAN con informacion verificable.",
+        }
+    return {
+        "field": "consulta_qr_dian",
+        "document_value": qr_url,
+        "qr_page_value": "La pagina DIAN no cargo informacion util del RUT.",
+        "status": "invalid_qr_page",
+        "message": "El QR fue detectado, pero no abre una pagina DIAN con informacion verificable. Marca el documento como posible no original o adulterado.",
+    }
+
+
+def compare_results(document_extraction: Dict[str, Any], page_extraction: Dict[str, Any], qr_page_loaded: bool, qr_url: Optional[str]) -> Dict[str, Any]:
+    doc_fields = document_extraction.get("document_fields") or {}
+    page_fields = page_extraction.get("page_fields") or {}
+    watermark_validation = validate_document_watermark(doc_fields)
+    comparisons = compare_simple_fields(doc_fields, page_fields)
+    comparisons.append(compare_responsabilidades(doc_fields, page_fields))
+    comparisons.append(build_watermark_comparison(watermark_validation))
+    comparisons.append(build_qr_page_comparison(qr_page_loaded, qr_url))
+    differences = [r for r in comparisons if r["status"] in {"different", "invalid_qr_page"}]
     matches = [r for r in comparisons if r["status"] == "match"]
     invalid_draft = bool(watermark_validation.get("is_draft"))
+    invalid_qr_page = not qr_page_loaded
 
     if invalid_draft:
         verification_status = "invalid_document"
         same_information = False
-    elif not qr_page_accessible or not page_extraction.get("page_loaded"):
-        verification_status = "inconclusive"
-        same_information = None
+    elif invalid_qr_page:
+        verification_status = "invalid_document"
+        same_information = False
     elif differences:
         verification_status = "different"
         same_information = False
@@ -453,30 +483,38 @@ def compare_results(document_extraction: Dict[str, Any], page_extraction: Dict[s
     }
 
 
-def validate_rut(api_key: str, model: str, file_bytes: bytes, filename: str, manual_qr_url: Optional[str] = None, prefer_browser: bool = True) -> Dict[str, Any]:
+def validate_rut(api_key: str, model: str, file_bytes: bytes, filename: str, prefer_browser: bool = True) -> Dict[str, Any]:
     images = load_images(file_bytes, filename, max_pages=3)
     qr_url_local = decode_qr_from_images(images)
     document_extraction = analyze_document_with_openai(api_key, model, file_bytes, filename)
+    doc_fields = document_extraction.get("document_fields") or {}
+    watermark_validation = validate_document_watermark(doc_fields)
     qr_url_ai = document_extraction.get("qr_url_detected_by_ai")
-    qr_url = (manual_qr_url or qr_url_local or qr_url_ai or "").strip() or None
+    qr_url = (qr_url_local or qr_url_ai or "").strip() or None
     result: Dict[str, Any] = {
         "ok": True,
         "filename": filename,
         "qr_url": qr_url,
-        "qr_url_source": "manual" if manual_qr_url else ("local_opencv" if qr_url_local else ("openai" if qr_url_ai else None)),
+        "qr_url_source": "local_opencv" if qr_url_local else ("openai" if qr_url_ai else None),
         "qr_url_local_opencv": qr_url_local,
         "qr_url_detected_by_ai": qr_url_ai,
         "document_extraction": document_extraction,
     }
     if not qr_url:
+        invalid_draft = bool(watermark_validation.get("is_draft"))
         result.update({
             "qr_page_accessible": False,
-            "verification_status": "qr_unavailable",
-            "same_information": None,
+            "verification_status": "invalid_document" if invalid_draft else "qr_unavailable",
+            "same_information": False if invalid_draft else None,
             "dian_page_extraction": None,
-            "comparisons": [],
-            "notes": ["No se pudo decodificar QR. Pega la URL del QR manualmente o sube una imagen más nítida."],
+            "document_watermark_validation": watermark_validation,
+            "comparisons": [build_watermark_comparison(watermark_validation)],
+            "match_count": 0,
+            "difference_count": 0,
+            "notes": ["No se pudo decodificar QR. Sube una imagen mas nitida o un PDF con el QR visible."],
         })
+        if invalid_draft:
+            result["notes"].insert(0, watermark_validation.get("message") or "Documento con marca de agua de borrador.")
         return result
     fetch = fetch_dian_page(qr_url, prefer_browser=prefer_browser)
     result["dian_fetch"] = {
@@ -489,9 +527,10 @@ def validate_rut(api_key: str, model: str, file_bytes: bytes, filename: str, man
         "has_screenshot": bool(fetch.screenshot_png),
     }
     page_extraction = analyze_dian_page_with_openai(api_key, model, fetch)
-    comparison = compare_results(document_extraction, page_extraction, fetch.accessible)
+    qr_page_loaded = bool(fetch.accessible and page_extraction.get("page_loaded"))
+    comparison = compare_results(document_extraction, page_extraction, qr_page_loaded, qr_url)
     result.update(comparison)
-    result["qr_page_accessible"] = bool(fetch.accessible and page_extraction.get("page_loaded"))
+    result["qr_page_accessible"] = qr_page_loaded
     result["dian_page_extraction"] = page_extraction
     notes: List[str] = []
     watermark_validation = result.get("document_watermark_validation") or {}
@@ -499,7 +538,7 @@ def validate_rut(api_key: str, model: str, file_bytes: bytes, filename: str, man
         notes.append(watermark_validation.get("message") or "Documento con marca de agua de borrador.")
     if fetch.error:
         notes.append(f"DIAN fetch error: {fetch.error}")
-    if not fetch.accessible:
-        notes.append("La página DIAN no cargó datos útiles. Puede requerir navegador real, cookies, JavaScript, CAPTCHA o estar bloqueada.")
+    if not qr_page_loaded:
+        notes.append("El QR fue detectado, pero DIAN no cargo informacion util del RUT. El documento se marca como posible no original o adulterado.")
     result["notes"] = notes
     return result

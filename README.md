@@ -60,9 +60,8 @@ OPENAI_MODEL=gpt-5.5
 
 1. Carga el PDF o imagen del RUT.
 2. Revisa si el sistema decodificó la URL del QR.
-3. Si no decodifica, pega manualmente la URL del QR en el campo opcional.
-4. Haz clic en **Analizar y comparar**.
-5. Descarga el resultado JSON.
+3. Haz clic en **Analizar y comparar**.
+4. Descarga el resultado JSON.
 
 ## Migración a servidor privado
 
@@ -77,8 +76,8 @@ En producción considera agregar autenticación, HTTPS y políticas de retenció
 
 ## Limitaciones
 
-- DIAN/MUISCA puede bloquear automatización, exigir cookies, JavaScript o CAPTCHA. En ese caso el resultado puede ser `inconclusive`.
-- La lectura de QR depende de la nitidez del documento. Si falla, pega la URL manualmente.
+- Si el QR se detecta pero DIAN/MUISCA no abre una página con información útil del RUT, el documento se marca como `invalid_document`.
+- La lectura de QR depende de la nitidez del documento. Si falla, sube una imagen más nítida o un PDF con el QR visible.
 - El análisis con OpenAI se envía a la API; no uses documentos sensibles si no tienes autorización del titular.
 
 ## Validación de marca de agua
@@ -105,7 +104,7 @@ Esta versión agrega:
 - Carpeta `.streamlit/config.toml` para reducir la barra superior de Streamlit y ocultar opciones como Deploy.
 - Botón `Limpiar / subir otro documento`.
 - El botón `Analizar y comparar` se deshabilita después de analizar el mismo archivo con la misma configuración.
-- Para volver a analizar, cambia el archivo, cambia la URL QR manual, cambia el modelo/configuración o usa `Limpiar / subir otro documento`.
+- Para volver a analizar, cambia el archivo, cambia el modelo/configuración o usa `Limpiar / subir otro documento`.
 
 Si la app está corriendo, detén con `Ctrl + C` y vuelve a ejecutar:
 
