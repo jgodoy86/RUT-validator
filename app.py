@@ -7,6 +7,7 @@ from typing import Any, Optional, Tuple
 
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
 
 from rut_validator import validate_rut
@@ -187,6 +188,30 @@ st.markdown(
         border-color: #bae6fd;
         color: #075985;
     }
+    .copy-cell {
+        align-items: center;
+        display: flex;
+        gap: 0.5rem;
+        justify-content: space-between;
+    }
+    .copy-cell-value {
+        min-width: 0;
+        overflow-wrap: anywhere;
+    }
+    button.copy-btn {
+        background: #ffffff;
+        border: 1px solid #cbd5e1;
+        border-radius: 0.45rem;
+        cursor: pointer;
+        flex-shrink: 0;
+        font-size: 0.85rem;
+        line-height: 1;
+        padding: 0.2rem 0.35rem;
+    }
+    button.copy-btn:hover {
+        background: #e0f2fe;
+        border-color: #38bdf8;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -326,6 +351,68 @@ def show_analysis_error(exc: Exception) -> None:
     st.error(f"Error durante el analisis: {message}")
 
 
+# st.markdown no ejecuta manejadores onclick (React los descarta), por eso el botón
+# solo lleva data-copy y este script — inyectado en un iframe con components.html —
+# instala un único listener delegado sobre el documento padre.
+COPY_BUTTON_SCRIPT = """
+<script>
+(function () {
+    const doc = window.parent.document;
+    if (doc.__rutCopyDelegated) { return; }
+    doc.__rutCopyDelegated = true;
+    doc.addEventListener("click", function (event) {
+        const btn = event.target && event.target.closest ? event.target.closest("button.copy-btn") : null;
+        if (!btn) { return; }
+        const value = btn.getAttribute("data-copy") || "";
+        const done = function () {
+            btn.textContent = "✔";
+            setTimeout(function () { btn.textContent = "📋"; }, 1200);
+        };
+        const fallback = function () {
+            const area = doc.createElement("textarea");
+            area.value = value;
+            area.style.position = "fixed";
+            area.style.opacity = "0";
+            doc.body.appendChild(area);
+            area.focus();
+            area.select();
+            try { doc.execCommand("copy"); } catch (err) {}
+            doc.body.removeChild(area);
+            done();
+        };
+        const clipboard = window.parent.navigator.clipboard;
+        if (clipboard && window.parent.isSecureContext) {
+            clipboard.writeText(value).then(done, fallback);
+        } else {
+            fallback();
+        }
+    }, true);
+})();
+</script>
+"""
+
+
+def copy_button_html(escaped_value: str) -> str:
+    """Botón de copiar para un valor ya escapado con html.escape (sin botón si no hay dato)."""
+    if not escaped_value or escaped_value == "—":
+        return ""
+    return (
+        f'<button type="button" class="copy-btn" data-copy="{escaped_value}" '
+        'title="Copiar al portapapeles">📋</button>'
+    )
+
+
+def copy_cell_html(escaped_value: str) -> str:
+    button = copy_button_html(escaped_value)
+    if not button:
+        return escaped_value
+    return (
+        "<span class='copy-cell'>"
+        f"<span class='copy-cell-value'>{escaped_value}</span>{button}"
+        "</span>"
+    )
+
+
 def build_comparison_table_html(rows: list[dict]) -> str:
     header = (
         "<tr>"
@@ -366,8 +453,8 @@ def build_comparison_table_html(rows: list[dict]) -> str:
             "<tr>"
             f"<td style='padding:0.6rem 0.75rem; border-bottom:1px solid #e5e7eb;'>{html.escape(row['Campo'])}</td>"
             f"<td style='padding:0.6rem 0.75rem; background:{background}; border-radius:0.65rem; white-space:nowrap;'>{status}</td>"
-            f"<td style='padding:0.6rem 0.75rem; border-bottom:1px solid #e5e7eb;'>{doc_value}</td>"
-            f"<td style='padding:0.6rem 0.75rem; border-bottom:1px solid #e5e7eb;'>{page_value}</td>"
+            f"<td style='padding:0.6rem 0.75rem; border-bottom:1px solid #e5e7eb;'>{copy_cell_html(doc_value)}</td>"
+            f"<td style='padding:0.6rem 0.75rem; border-bottom:1px solid #e5e7eb;'>{copy_cell_html(page_value)}</td>"
             "</tr>"
         )
     return (
@@ -660,6 +747,7 @@ if result_to_show:
             table_html = build_comparison_table_html(comparison_rows)
             st.caption("Comparación campo por campo")
             st.markdown(table_html, unsafe_allow_html=True)
+            components.html(COPY_BUTTON_SCRIPT, height=0)
         else:
             st.info("No hay comparación disponible.")
 
