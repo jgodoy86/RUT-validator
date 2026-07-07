@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from typing import Any, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -12,6 +13,47 @@ from rut_validator import validate_rut
 load_dotenv()
 
 st.set_page_config(page_title="Validador RUT DIAN", page_icon="✅", layout="wide")
+st.markdown(
+    """
+    <style>
+    div[data-testid="stMainBlockContainer"] {
+        padding-top: 0.5rem;
+    }
+    div[data-testid="stMetric"] {
+        background: #f8fafc;
+        border: 1px solid #e5e7eb;
+        border-radius: 0.75rem;
+        padding: 0.75rem 0.9rem;
+    }
+    .result-banner {
+        background: linear-gradient(90deg, #f8fafc 0%, #ffffff 100%);
+        border: 1px solid #e5e7eb;
+        border-left: 5px solid #2563eb;
+        border-radius: 0.85rem;
+        padding: 1rem 1.1rem;
+        margin-bottom: 1rem;
+    }
+    .result-banner-title {
+        font-size: 1.05rem;
+        font-weight: 700;
+        margin-bottom: 0.25rem;
+    }
+    .result-banner-subtitle {
+        color: #475467;
+        font-size: 0.95rem;
+    }
+    .notes-box {
+        background: #fffbeb;
+        border: 1px solid #fcd34d;
+        border-left: 4px solid #f59e0b;
+        border-radius: 0.65rem;
+        padding: 0.75rem 0.9rem;
+        margin-top: 0.75rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 def file_fingerprint(file_bytes: bytes, filename: str) -> str:
@@ -26,6 +68,37 @@ def reset_upload_state():
     st.session_state["last_filename"] = None
     st.session_state["analysis_pending"] = False
     st.session_state["processing_signature"] = None
+
+
+def status_label_for_verification(status: Optional[str], same: Any) -> Tuple[str, str, str]:
+    if status == "invalid_document":
+        return "❌ Documento inválido", "error", "El documento fue marcado como inválido por la marca de agua o por la comparación."
+    if status == "match":
+        return "✅ Coincide", "success", "La información del documento y la página DIAN coincide."
+    if status == "different":
+        return "⚠️ Diferencias detectadas", "warning", "Se encontraron diferencias entre el documento y la página DIAN."
+    if status == "qr_unavailable":
+        return "🔎 QR no disponible", "info", "No fue posible obtener una URL del QR para consultar DIAN."
+    return "❓ Sin conclusión", "info", "No fue posible concluir la comparación con certeza."
+
+
+def comparison_status_label(status: Optional[str]) -> Tuple[str, str]:
+    mapping = {
+        "match": ("Coincide", "#2e7d32"),
+        "different": ("Diferente", "#c62828"),
+        "only_in_document": ("Solo en documento", "#ef6c00"),
+        "only_in_qr_page": ("Solo en QR/DIAN", "#1565c0"),
+        "missing": ("Sin dato", "#6c757d"),
+    }
+    return mapping.get(status or "", ("Sin dato", "#6c757d"))
+
+
+def format_comparison_value(value: Any) -> str:
+    if value is None:
+        return "—"
+    if isinstance(value, (list, dict)):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
 
 
 if "uploader_key" not in st.session_state:
@@ -176,27 +249,46 @@ if result_to_show:
     same = result.get("same_information")
 
     watermark = result.get("document_watermark_validation") or {}
+    title, banner_type, detail_message = status_label_for_verification(status, same)
+
+    status_color = {
+        "error": "#b42318",
+        "success": "#027a48",
+        "warning": "#b54708",
+        "info": "#175cd3",
+    }.get(banner_type, "#175cd3")
+
+    st.markdown(
+        f"""
+        <div class="result-banner" style="border-left: 5px solid {status_color};">
+            <div class="result-banner-title">{title}</div>
+            <div class="result-banner-subtitle">{detail_message}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if banner_type == "error":
+        st.error(watermark.get("message") or "Documento inválido por marca de agua.")
+    elif banner_type == "success":
+        st.success("La información verificada coincide con lo recuperado desde el QR.")
+    elif banner_type == "warning":
+        st.warning("Hay diferencias entre el documento y la página del QR.")
+    else:
+        st.info("No fue posible concluir la comparación con certeza.")
+
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Estado", status or "sin estado")
+    c1.metric("Estado", title)
     c2.metric("Coincide", "Sí" if same is True else ("No" if same is False else "No concluyente"))
     c3.metric("Fuente QR", result.get("qr_url_source") or "no detectado")
     c4.metric("Marca de agua", watermark.get("status") or "sin validar")
-
-    if status == "invalid_document":
-        st.error(watermark.get("message") or "Documento inválido por marca de agua.")
-    elif status == "match":
-        st.success("La información verificada coincide con lo recuperado desde el QR.")
-    elif status == "different":
-        st.error("Hay diferencias entre el documento y la página del QR.")
-    else:
-        st.warning("No fue posible concluir la comparación con certeza.")
 
     if result.get("qr_url"):
         st.text_input("URL QR usada", value=result["qr_url"], disabled=True)
 
     if result.get("notes"):
-        for note in result["notes"]:
-            st.warning(note)
+        notes_html = "<strong>Notas</strong><br>" + "<br>".join(f"• {note}" for note in result["notes"])
+        st.markdown(f'<div class="notes-box">{notes_html}</div>', unsafe_allow_html=True)
 
     doc_fields = (result.get("document_extraction") or {}).get("document_fields") or {}
     page_fields = (result.get("dian_page_extraction") or {}).get("page_fields") or {}
@@ -206,8 +298,30 @@ if result_to_show:
 
     with tab1:
         if comparisons:
-            df = pd.DataFrame(comparisons)
-            st.dataframe(df, use_container_width=True)
+            comparison_rows = []
+            for row in comparisons:
+                label, _ = comparison_status_label(row.get("status"))
+                comparison_rows.append({
+                    "Campo": row.get("field"),
+                    "Estado": label,
+                    "Documento": format_comparison_value(row.get("document_value")),
+                    "QR/DIAN": format_comparison_value(row.get("qr_page_value")),
+                })
+            comparison_df = pd.DataFrame(comparison_rows)
+
+            def highlight_status(value: str) -> str:
+                color_map = {
+                    "Coincide": "background-color: #d4edda; color: #155724;",
+                    "Diferente": "background-color: #f8d7da; color: #721c24;",
+                    "Solo en documento": "background-color: #fff3cd; color: #856404;",
+                    "Solo en QR/DIAN": "background-color: #d1ecf1; color: #0c5460;",
+                    "Sin dato": "background-color: #e2e3e5; color: #383d41;",
+                }
+                return color_map.get(value, "")
+
+            styled_df = comparison_df.style.applymap(lambda v: highlight_status(v), subset=["Estado"])
+            st.caption("Comparación campo por campo")
+            st.dataframe(styled_df, use_container_width=True, hide_index=True)
         else:
             st.info("No hay comparación disponible.")
 
@@ -230,7 +344,8 @@ if result_to_show:
 
     with tab4:
         pretty = json.dumps(result, ensure_ascii=False, indent=2)
-        st.code(pretty, language="json")
+        with st.expander("Ver JSON completo", expanded=False):
+            st.code(pretty, language="json")
         st.download_button(
             "Descargar resultado JSON",
             data=pretty.encode("utf-8"),
