@@ -732,11 +732,18 @@ if result_to_show:
     else:
         st.info("No fue posible concluir la comparación con certeza.")
 
-    c1, c2, c3, c4 = st.columns(4)
+    obligado_fe = result.get("obligado_facturar_electronica") or {}
+
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Estado", title)
     c2.metric("Coincide", "Sí" if same is True else ("No" if same is False else "No concluyente"))
     c3.metric("Fuente QR", result.get("qr_url_source") or "no detectado")
     c4.metric("Marca de agua", watermark.get("status") or "sin validar")
+    c5.metric(
+        "Factura electrónica",
+        "Obligado (cód. 52)" if obligado_fe.get("obligado") else "No registra cód. 52",
+        help=obligado_fe.get("message"),
+    )
 
     if result.get("qr_url"):
         st.text_input("URL QR usada", value=result["qr_url"], disabled=True)

@@ -375,6 +375,30 @@ def compare_responsabilidades(document_fields: Dict[str, Any], page_fields: Dict
     }
 
 
+def check_obligado_facturar_electronica(document_fields: Dict[str, Any]) -> Dict[str, Any]:
+    """Código de responsabilidad 52 = obligado a facturar electrónicamente
+    (confirmado con el equipo de Contabilidad, no es una inferencia propia)."""
+    codes: set = set()
+    items = document_fields.get("responsabilidades")
+    if isinstance(items, list):
+        for item in items:
+            if isinstance(item, dict) and item.get("codigo"):
+                c = normalize_numeric(item.get("codigo"))
+                if c:
+                    codes.add(c.zfill(2))
+    obligado = "52" in codes
+    return {
+        "obligado": obligado,
+        "codigo": "52",
+        "message": (
+            "El RUT incluye el código de responsabilidad 52: obligado a facturar electrónicamente."
+            if obligado
+            else "No se encontró el código de responsabilidad 52 en el RUT extraído. "
+            "Verifica manualmente si aplica, especialmente si la extracción del documento tuvo advertencias."
+        ),
+    }
+
+
 def normalize_watermark_text(value: Any) -> str:
     if value is None:
         return ""
@@ -503,6 +527,7 @@ def validate_rut(api_key: str, model: str, file_bytes: bytes, filename: str, pre
         "qr_url_local_opencv": qr_url_local,
         "qr_url_detected_by_ai": qr_url_ai,
         "document_extraction": document_extraction,
+        "obligado_facturar_electronica": check_obligado_facturar_electronica(doc_fields),
         "previews": {
             "document_pages_png": document_pages_png,
             "dian_screenshot_png": None,
@@ -510,16 +535,26 @@ def validate_rut(api_key: str, model: str, file_bytes: bytes, filename: str, pre
     }
     if not qr_url:
         invalid_draft = bool(watermark_validation.get("is_draft"))
+        # Sin QR no hay con qué comparar en DIAN, pero igual se muestran todos
+        # los campos ya extraídos del documento (compare_simple_fields con
+        # page_fields vacío marca cada uno como "only_in_document").
+        doc_only_comparisons = compare_simple_fields(doc_fields, {})
+        doc_only_comparisons.append(compare_responsabilidades(doc_fields, {}))
+        doc_only_comparisons.append(build_watermark_comparison(watermark_validation))
         result.update({
             "qr_page_accessible": False,
             "verification_status": "invalid_document" if invalid_draft else "qr_unavailable",
             "same_information": False if invalid_draft else None,
             "dian_page_extraction": None,
             "document_watermark_validation": watermark_validation,
-            "comparisons": [build_watermark_comparison(watermark_validation)],
+            "comparisons": doc_only_comparisons,
             "match_count": 0,
             "difference_count": 0,
-            "notes": ["No se pudo decodificar QR. Sube una imagen mas nitida o un PDF con el QR visible."],
+            "notes": [
+                "No se pudo decodificar el QR ni consultar DIAN. Se muestran los campos "
+                "extraídos del documento sin comparar contra la página oficial; revisa "
+                "manualmente contra la DIAN si necesitas certeza total."
+            ],
         })
         if invalid_draft:
             result["notes"].insert(0, watermark_validation.get("message") or "Documento con marca de agua de borrador.")
