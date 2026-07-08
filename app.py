@@ -20,7 +20,14 @@ st.markdown(
     """
     <style>
     div[data-testid="stMainBlockContainer"] {
-        padding-top: 0.5rem;
+        padding-top: 1.75rem;
+    }
+    /* El título de Streamlit trae un line-height ajustado que recorta las
+       letras (se ve "mocho"); le damos aire arriba y abajo. */
+    div[data-testid="stMainBlockContainer"] h1 {
+        line-height: 1.2;
+        padding-top: 0.25rem;
+        padding-bottom: 0.5rem;
     }
     div[data-testid="stMetric"] {
         background: #f8fafc;
@@ -479,7 +486,7 @@ if "analysis_pending" not in st.session_state:
 if "processing_signature" not in st.session_state:
     st.session_state["processing_signature"] = None
 
-st.title("Validador local de RUT DIAN por QR")
+st.title("Validador RUT DIAN")
 st.caption("Carga un PDF o imagen del RUT, decodifica el QR, consulta DIAN/MUISCA y compara los campos.")
 
 with st.sidebar:
