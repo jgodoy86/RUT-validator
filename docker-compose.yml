@@ -22,10 +22,13 @@ services:
       app:
         condition: service_healthy
     ports:
-      # Se publica SOLO en la IP privada/VPN del servidor (BIND_IP en .env),
-      # nunca en 0.0.0.0. Así, aunque el firewall del SO esté mal configurado,
-      # Docker no expone el puerto 443 a internet.
-      - "${BIND_IP:-127.0.0.1}:443:443"
+      # Puerto 8443 (no 443): en este servidor Apache ya ocupa 80/443 para
+      # los portales públicos existentes. BIND_IP permite restringir a una
+      # IP interna si el host llega a tener más de una interfaz; con una sola
+      # IP (como aquí), el aislamiento real depende del firewall perimetral
+      # del proveedor de la nube — pídeles que solo abran 8443 para la
+      # VPN/red interna, igual que ya tienen para los puertos 3000/5678.
+      - "${BIND_IP:-0.0.0.0}:8443:8443"
     volumes:
       - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ./deploy/certs:/etc/nginx/certs:ro
