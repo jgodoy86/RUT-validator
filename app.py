@@ -518,7 +518,10 @@ with st.sidebar:
                 except Exception as exc:
                     st.error(f"No se pudo guardar la API key: {exc}")
         model = st.text_input("Modelo", value=os.getenv("OPENAI_MODEL", "gpt-5.5"))
-        prefer_browser = st.checkbox("Abrir DIAN con navegador local (Playwright)", value=True)
+        # La página DIAN suele necesitar JavaScript, así que siempre se intenta
+        # primero con el navegador local (Playwright) y requests queda como
+        # respaldo automático. Es un detalle técnico, no una opción de usuario.
+        prefer_browser = True
         if st.button("Probar conexión OpenAI", disabled=not api_key):
             ok, message = check_openai_connection(api_key)
             if ok:
