@@ -485,6 +485,10 @@ def compare_results(document_extraction: Dict[str, Any], page_extraction: Dict[s
 
 def validate_rut(api_key: str, model: str, file_bytes: bytes, filename: str, prefer_browser: bool = True) -> Dict[str, Any]:
     images = load_images(file_bytes, filename, max_pages=3)
+    # Previsualización del documento (para la vista comparada en la UI). Se
+    # renderiza una sola vez y se transporta como PNG en bytes; app.py lo
+    # excluye del JSON descargable porque no es serializable.
+    document_pages_png = [pil_to_png_bytes(img) for img in images]
     qr_url_local = decode_qr_from_images(images)
     document_extraction = analyze_document_with_openai(api_key, model, file_bytes, filename)
     doc_fields = document_extraction.get("document_fields") or {}
@@ -499,6 +503,10 @@ def validate_rut(api_key: str, model: str, file_bytes: bytes, filename: str, pre
         "qr_url_local_opencv": qr_url_local,
         "qr_url_detected_by_ai": qr_url_ai,
         "document_extraction": document_extraction,
+        "previews": {
+            "document_pages_png": document_pages_png,
+            "dian_screenshot_png": None,
+        },
     }
     if not qr_url:
         invalid_draft = bool(watermark_validation.get("is_draft"))
@@ -517,6 +525,7 @@ def validate_rut(api_key: str, model: str, file_bytes: bytes, filename: str, pre
             result["notes"].insert(0, watermark_validation.get("message") or "Documento con marca de agua de borrador.")
         return result
     fetch = fetch_dian_page(qr_url, prefer_browser=prefer_browser)
+    result["previews"]["dian_screenshot_png"] = fetch.screenshot_png
     result["dian_fetch"] = {
         "accessible": fetch.accessible,
         "method": fetch.method,

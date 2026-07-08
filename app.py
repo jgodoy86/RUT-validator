@@ -7,6 +7,7 @@ from typing import Any, Optional, Tuple
 
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
 
 from rut_validator import validate_rut
@@ -19,7 +20,14 @@ st.markdown(
     """
     <style>
     div[data-testid="stMainBlockContainer"] {
-        padding-top: 0.5rem;
+        padding-top: 1.75rem;
+    }
+    /* El título de Streamlit trae un line-height ajustado que recorta las
+       letras (se ve "mocho"); le damos aire arriba y abajo. */
+    div[data-testid="stMainBlockContainer"] h1 {
+        line-height: 1.2;
+        padding-top: 0.25rem;
+        padding-bottom: 0.5rem;
     }
     div[data-testid="stMetric"] {
         background: #f8fafc;
@@ -187,6 +195,30 @@ st.markdown(
         border-color: #bae6fd;
         color: #075985;
     }
+    .copy-cell {
+        align-items: center;
+        display: flex;
+        gap: 0.5rem;
+        justify-content: space-between;
+    }
+    .copy-cell-value {
+        min-width: 0;
+        overflow-wrap: anywhere;
+    }
+    button.copy-btn {
+        background: #ffffff;
+        border: 1px solid #cbd5e1;
+        border-radius: 0.45rem;
+        cursor: pointer;
+        flex-shrink: 0;
+        font-size: 0.85rem;
+        line-height: 1;
+        padding: 0.2rem 0.35rem;
+    }
+    button.copy-btn:hover {
+        background: #e0f2fe;
+        border-color: #38bdf8;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -326,6 +358,68 @@ def show_analysis_error(exc: Exception) -> None:
     st.error(f"Error durante el analisis: {message}")
 
 
+# st.markdown no ejecuta manejadores onclick (React los descarta), por eso el botón
+# solo lleva data-copy y este script — inyectado en un iframe con components.html —
+# instala un único listener delegado sobre el documento padre.
+COPY_BUTTON_SCRIPT = """
+<script>
+(function () {
+    const doc = window.parent.document;
+    if (doc.__rutCopyDelegated) { return; }
+    doc.__rutCopyDelegated = true;
+    doc.addEventListener("click", function (event) {
+        const btn = event.target && event.target.closest ? event.target.closest("button.copy-btn") : null;
+        if (!btn) { return; }
+        const value = btn.getAttribute("data-copy") || "";
+        const done = function () {
+            btn.textContent = "✔";
+            setTimeout(function () { btn.textContent = "📋"; }, 1200);
+        };
+        const fallback = function () {
+            const area = doc.createElement("textarea");
+            area.value = value;
+            area.style.position = "fixed";
+            area.style.opacity = "0";
+            doc.body.appendChild(area);
+            area.focus();
+            area.select();
+            try { doc.execCommand("copy"); } catch (err) {}
+            doc.body.removeChild(area);
+            done();
+        };
+        const clipboard = window.parent.navigator.clipboard;
+        if (clipboard && window.parent.isSecureContext) {
+            clipboard.writeText(value).then(done, fallback);
+        } else {
+            fallback();
+        }
+    }, true);
+})();
+</script>
+"""
+
+
+def copy_button_html(escaped_value: str) -> str:
+    """Botón de copiar para un valor ya escapado con html.escape (sin botón si no hay dato)."""
+    if not escaped_value or escaped_value == "—":
+        return ""
+    return (
+        f'<button type="button" class="copy-btn" data-copy="{escaped_value}" '
+        'title="Copiar al portapapeles">📋</button>'
+    )
+
+
+def copy_cell_html(escaped_value: str) -> str:
+    button = copy_button_html(escaped_value)
+    if not button:
+        return escaped_value
+    return (
+        "<span class='copy-cell'>"
+        f"<span class='copy-cell-value'>{escaped_value}</span>{button}"
+        "</span>"
+    )
+
+
 def build_comparison_table_html(rows: list[dict]) -> str:
     header = (
         "<tr>"
@@ -366,8 +460,8 @@ def build_comparison_table_html(rows: list[dict]) -> str:
             "<tr>"
             f"<td style='padding:0.6rem 0.75rem; border-bottom:1px solid #e5e7eb;'>{html.escape(row['Campo'])}</td>"
             f"<td style='padding:0.6rem 0.75rem; background:{background}; border-radius:0.65rem; white-space:nowrap;'>{status}</td>"
-            f"<td style='padding:0.6rem 0.75rem; border-bottom:1px solid #e5e7eb;'>{doc_value}</td>"
-            f"<td style='padding:0.6rem 0.75rem; border-bottom:1px solid #e5e7eb;'>{page_value}</td>"
+            f"<td style='padding:0.6rem 0.75rem; border-bottom:1px solid #e5e7eb;'>{copy_cell_html(doc_value)}</td>"
+            f"<td style='padding:0.6rem 0.75rem; border-bottom:1px solid #e5e7eb;'>{copy_cell_html(page_value)}</td>"
             "</tr>"
         )
     return (
@@ -392,7 +486,7 @@ if "analysis_pending" not in st.session_state:
 if "processing_signature" not in st.session_state:
     st.session_state["processing_signature"] = None
 
-st.title("Validador local de RUT DIAN por QR")
+st.title("Validador RUT DIAN")
 st.caption("Carga un PDF o imagen del RUT, decodifica el QR, consulta DIAN/MUISCA y compara los campos.")
 
 with st.sidebar:
@@ -400,21 +494,41 @@ with st.sidebar:
         if logo_path:
             st.image(str(logo_path), width=180)
         st.header("Configuración")
-        env_key = os.getenv("OPENAI_API_KEY", "")
-        api_key = st.text_input("OpenAI API key", value=env_key, type="password")
+        saved_key = os.getenv("OPENAI_API_KEY", "").strip()
+        if saved_key:
+            # Ya hay clave configurada. Por seguridad NO la mostramos ni la
+            # cargamos al navegador (un campo password igual expone el valor en
+            # el DOM). Solo estado + opción de reemplazarla. El botón "Guardar"
+            # no se muestra mientras exista una clave.
+            api_key = saved_key
+            st.success("🔑 API key configurada")
+            st.caption(
+                "Por seguridad, la clave guardada no se muestra. Para cambiarla, "
+                "elimínala y guarda una nueva."
+            )
+            if st.button("Eliminar API key", type="secondary"):
+                try:
+                    set_env_variable("OPENAI_API_KEY", "")
+                    load_dotenv(get_env_path(), override=True)
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"No se pudo eliminar la API key: {exc}")
+        else:
+            # No hay clave: primera vez (o tras eliminar). Se muestra el campo
+            # y el botón Guardar. El campo arranca vacío, nunca precargado.
+            api_key = st.text_input("OpenAI API key", value="", type="password").strip()
+            if st.button("Guardar API key", disabled=not api_key):
+                try:
+                    set_env_variable("OPENAI_API_KEY", api_key)
+                    load_dotenv(get_env_path(), override=True)
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"No se pudo guardar la API key: {exc}")
         model = st.text_input("Modelo", value=os.getenv("OPENAI_MODEL", "gpt-5.5"))
-        prefer_browser = st.checkbox("Abrir DIAN con navegador local (Playwright)", value=True)
-        if st.button("Guardar API key") and api_key:
-            try:
-                set_env_variable("OPENAI_API_KEY", api_key.strip())
-                load_dotenv(get_env_path(), override=True)
-                st.success("API key guardada correctamente.")
-                if hasattr(st, "experimental_rerun"):
-                    st.experimental_rerun()
-                else:
-                    st.info("Recarga la app manualmente si el valor no se aplica de inmediato.")
-            except Exception as exc:
-                st.error(f"No se pudo guardar la API key: {exc}")
+        # La página DIAN suele necesitar JavaScript, así que siempre se intenta
+        # primero con el navegador local (Playwright) y requests queda como
+        # respaldo automático. Es un detalle técnico, no una opción de usuario.
+        prefer_browser = True
         if st.button("Probar conexión OpenAI", disabled=not api_key):
             ok, message = check_openai_connection(api_key)
             if ok:
@@ -634,8 +748,38 @@ if result_to_show:
     doc_fields = (result.get("document_extraction") or {}).get("document_fields") or {}
     page_fields = (result.get("dian_page_extraction") or {}).get("page_fields") or {}
     comparisons = result.get("comparisons") or []
+    previews = result.get("previews") or {}
+    document_pages_png = previews.get("document_pages_png") or []
+    dian_screenshot_png = previews.get("dian_screenshot_png")
 
-    tab1, tab2, tab3, tab4 = st.tabs(["Comparación", "Documento", "Página DIAN", "JSON"])
+    tab_preview, tab1, tab2, tab3, tab4 = st.tabs(
+        ["Vista comparada", "Comparación", "Documento", "Página DIAN", "JSON"]
+    )
+
+    with tab_preview:
+        st.caption(
+            "Compara el documento cargado (izquierda) con la página de DIAN abierta "
+            "desde el QR (derecha). Pasa el cursor sobre cada imagen y usa el icono de "
+            "ampliar (⛶) en la esquina para verla a pantalla completa y leerla mejor."
+        )
+        col_doc, col_dian = st.columns(2)
+        with col_doc:
+            st.markdown("**📄 Documento cargado**")
+            if document_pages_png:
+                for i, png in enumerate(document_pages_png):
+                    caption = f"Página {i + 1}" if len(document_pages_png) > 1 else None
+                    st.image(png, use_container_width=True, caption=caption)
+            else:
+                st.info("No hay previsualización del documento.")
+        with col_dian:
+            st.markdown("**🔎 Página DIAN (captura del QR)**")
+            if dian_screenshot_png:
+                st.image(dian_screenshot_png, use_container_width=True)
+            else:
+                st.info(
+                    "No se capturó la página DIAN. Puede que el QR no estuviera "
+                    "disponible o que DIAN no cargara la información."
+                )
 
     with tab1:
         if comparisons:
@@ -660,6 +804,7 @@ if result_to_show:
             table_html = build_comparison_table_html(comparison_rows)
             st.caption("Comparación campo por campo")
             st.markdown(table_html, unsafe_allow_html=True)
+            components.html(COPY_BUTTON_SCRIPT, height=0)
         else:
             st.info("No hay comparación disponible.")
 
@@ -681,7 +826,10 @@ if result_to_show:
         st.json(result.get("dian_fetch") or {})
 
     with tab4:
-        pretty = json.dumps(result, ensure_ascii=False, indent=2)
+        # "previews" lleva imágenes en bytes (no serializables) y pesaría de más
+        # en el JSON; se excluye del resultado descargable.
+        serializable = {k: v for k, v in result.items() if k != "previews"}
+        pretty = json.dumps(serializable, ensure_ascii=False, indent=2)
         with st.expander("Ver JSON completo", expanded=False):
             st.code(pretty, language="json")
         st.download_button(

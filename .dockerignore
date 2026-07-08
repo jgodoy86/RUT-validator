@@ -1,8 +1,9 @@
+.git/
 .venv/
 .env
 __pycache__/
 *.pyc
-.streamlit/secrets.toml
 outputs/
+.streamlit/secrets.toml
 deploy/certs/
 deploy/.htpasswd
