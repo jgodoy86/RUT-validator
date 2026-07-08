@@ -741,8 +741,38 @@ if result_to_show:
     doc_fields = (result.get("document_extraction") or {}).get("document_fields") or {}
     page_fields = (result.get("dian_page_extraction") or {}).get("page_fields") or {}
     comparisons = result.get("comparisons") or []
+    previews = result.get("previews") or {}
+    document_pages_png = previews.get("document_pages_png") or []
+    dian_screenshot_png = previews.get("dian_screenshot_png")
 
-    tab1, tab2, tab3, tab4 = st.tabs(["Comparación", "Documento", "Página DIAN", "JSON"])
+    tab_preview, tab1, tab2, tab3, tab4 = st.tabs(
+        ["Vista comparada", "Comparación", "Documento", "Página DIAN", "JSON"]
+    )
+
+    with tab_preview:
+        st.caption(
+            "Compara el documento cargado (izquierda) con la página de DIAN abierta "
+            "desde el QR (derecha). Pasa el cursor sobre cada imagen y usa el icono de "
+            "ampliar (⛶) en la esquina para verla a pantalla completa y leerla mejor."
+        )
+        col_doc, col_dian = st.columns(2)
+        with col_doc:
+            st.markdown("**📄 Documento cargado**")
+            if document_pages_png:
+                for i, png in enumerate(document_pages_png):
+                    caption = f"Página {i + 1}" if len(document_pages_png) > 1 else None
+                    st.image(png, use_container_width=True, caption=caption)
+            else:
+                st.info("No hay previsualización del documento.")
+        with col_dian:
+            st.markdown("**🔎 Página DIAN (captura del QR)**")
+            if dian_screenshot_png:
+                st.image(dian_screenshot_png, use_container_width=True)
+            else:
+                st.info(
+                    "No se capturó la página DIAN. Puede que el QR no estuviera "
+                    "disponible o que DIAN no cargara la información."
+                )
 
     with tab1:
         if comparisons:
@@ -789,7 +819,10 @@ if result_to_show:
         st.json(result.get("dian_fetch") or {})
 
     with tab4:
-        pretty = json.dumps(result, ensure_ascii=False, indent=2)
+        # "previews" lleva imágenes en bytes (no serializables) y pesaría de más
+        # en el JSON; se excluye del resultado descargable.
+        serializable = {k: v for k, v in result.items() if k != "previews"}
+        pretty = json.dumps(serializable, ensure_ascii=False, indent=2)
         with st.expander("Ver JSON completo", expanded=False):
             st.code(pretty, language="json")
         st.download_button(
