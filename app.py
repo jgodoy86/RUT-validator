@@ -487,21 +487,38 @@ with st.sidebar:
         if logo_path:
             st.image(str(logo_path), width=180)
         st.header("Configuración")
-        env_key = os.getenv("OPENAI_API_KEY", "")
-        api_key = st.text_input("OpenAI API key", value=env_key, type="password")
+        saved_key = os.getenv("OPENAI_API_KEY", "").strip()
+        if saved_key:
+            # Ya hay clave configurada. Por seguridad NO la mostramos ni la
+            # cargamos al navegador (un campo password igual expone el valor en
+            # el DOM). Solo estado + opción de reemplazarla. El botón "Guardar"
+            # no se muestra mientras exista una clave.
+            api_key = saved_key
+            st.success("🔑 API key configurada")
+            st.caption(
+                "Por seguridad, la clave guardada no se muestra. Para cambiarla, "
+                "elimínala y guarda una nueva."
+            )
+            if st.button("Eliminar API key", type="secondary"):
+                try:
+                    set_env_variable("OPENAI_API_KEY", "")
+                    load_dotenv(get_env_path(), override=True)
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"No se pudo eliminar la API key: {exc}")
+        else:
+            # No hay clave: primera vez (o tras eliminar). Se muestra el campo
+            # y el botón Guardar. El campo arranca vacío, nunca precargado.
+            api_key = st.text_input("OpenAI API key", value="", type="password").strip()
+            if st.button("Guardar API key", disabled=not api_key):
+                try:
+                    set_env_variable("OPENAI_API_KEY", api_key)
+                    load_dotenv(get_env_path(), override=True)
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"No se pudo guardar la API key: {exc}")
         model = st.text_input("Modelo", value=os.getenv("OPENAI_MODEL", "gpt-5.5"))
         prefer_browser = st.checkbox("Abrir DIAN con navegador local (Playwright)", value=True)
-        if st.button("Guardar API key") and api_key:
-            try:
-                set_env_variable("OPENAI_API_KEY", api_key.strip())
-                load_dotenv(get_env_path(), override=True)
-                st.success("API key guardada correctamente.")
-                if hasattr(st, "experimental_rerun"):
-                    st.experimental_rerun()
-                else:
-                    st.info("Recarga la app manualmente si el valor no se aplica de inmediato.")
-            except Exception as exc:
-                st.error(f"No se pudo guardar la API key: {exc}")
         if st.button("Probar conexión OpenAI", disabled=not api_key):
             ok, message = check_openai_connection(api_key)
             if ok:
