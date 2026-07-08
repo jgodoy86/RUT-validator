@@ -78,58 +78,6 @@ st.markdown(
         font-size: 0.92rem;
         margin-bottom: 0.95rem;
     }
-    .uploaded-file-card {
-        align-items: center;
-        background: #ffffff;
-        border: 1px solid #bae6fd;
-        border-radius: 0.85rem;
-        display: flex;
-        gap: 0.8rem;
-        justify-content: flex-start;
-        margin-top: 0.55rem;
-        min-height: 3.5rem;
-        padding: 0.65rem 0.8rem;
-        text-align: left;
-    }
-    .uploaded-file-icon {
-        align-items: center;
-        background: #e0f2fe;
-        border-radius: 0.65rem;
-        color: #075985;
-        display: flex;
-        font-size: 1.2rem;
-        height: 2.35rem;
-        justify-content: center;
-        width: 2.35rem;
-    }
-    .uploaded-file-name {
-        color: #0f172a;
-        font-weight: 700;
-        line-height: 1.2;
-        max-width: min(36rem, 70vw);
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-    }
-    .uploaded-file-meta {
-        color: #64748b;
-        font-size: 0.86rem;
-        margin-top: 0.15rem;
-    }
-    .remove-upload-button button {
-        align-items: center !important;
-        border: 1px solid #bae6fd !important;
-        border-radius: 999px !important;
-        color: #075985 !important;
-        display: inline-flex !important;
-        font-size: 1.15rem !important;
-        height: 2.25rem !important;
-        justify-content: center !important;
-        margin-top: 1rem !important;
-        min-width: 2.25rem !important;
-        padding: 0 !important;
-        width: 2.25rem !important;
-    }
     div[data-testid="stFileUploader"] {
         margin-top: 0.35rem;
     }
@@ -145,12 +93,6 @@ st.markdown(
         min-height: 118px;
         padding: 1.35rem 1rem !important;
         text-align: center;
-    }
-    div[data-testid="stFileUploader"] section[data-testid="stFileUploaderDropzone"] div[data-testid="stFileUploaderFile"] {
-        display: none !important;
-    }
-    div[data-testid="stFileUploader"] [data-testid="stFileUploaderFile"] {
-        display: none !important;
     }
     div[data-testid="stFileUploader"] section[data-testid="stFileUploaderDropzone"] > div {
         align-items: center;
@@ -230,17 +172,6 @@ def file_fingerprint(file_bytes: bytes, filename: str) -> str:
     return f"{filename}:{len(file_bytes)}:{digest}"
 
 
-def format_file_size(size_bytes: int) -> str:
-    if size_bytes >= 1024 * 1024:
-        return f"{size_bytes / (1024 * 1024):.1f} MB"
-    return f"{size_bytes / 1024:.1f} KB"
-
-
-def file_type_label(filename: str) -> str:
-    suffix = Path(filename).suffix.lower().lstrip(".")
-    return (suffix or "file").upper()[:4]
-
-
 def get_env_path() -> Path:
     return Path(__file__).resolve().parent / ".env"
 
@@ -297,11 +228,8 @@ def check_openai_connection(api_key: str) -> Tuple[bool, str]:
 
 def reset_upload_state():
     st.session_state["uploader_key"] = st.session_state.get("uploader_key", 0) + 1
-    st.session_state["last_result"] = None
-    st.session_state["last_signature"] = None
-    st.session_state["last_filename"] = None
-    st.session_state["analysis_pending"] = False
-    st.session_state["processing_signature"] = None
+    st.session_state["batch_results"] = {}
+    st.session_state["batch_pending"] = False
 
 
 def status_label_for_verification(status: Optional[str], same: Any) -> Tuple[str, str, str]:
@@ -336,8 +264,8 @@ def format_comparison_value(value: Any) -> str:
     return str(value)
 
 
-def show_analysis_error(exc: Exception) -> None:
-    message = str(exc)
+def show_analysis_error(exc_or_message: Any) -> None:
+    message = exc_or_message if isinstance(exc_or_message, str) else str(exc_or_message)
     network_markers = [
         "api.openai.com",
         "HTTPSConnectionPool",
@@ -473,21 +401,21 @@ def build_comparison_table_html(rows: list[dict]) -> str:
     )
 
 
+MAX_FILES = 5
+
 if "uploader_key" not in st.session_state:
     st.session_state["uploader_key"] = 0
-if "last_result" not in st.session_state:
-    st.session_state["last_result"] = None
-if "last_signature" not in st.session_state:
-    st.session_state["last_signature"] = None
-if "last_filename" not in st.session_state:
-    st.session_state["last_filename"] = None
-if "analysis_pending" not in st.session_state:
-    st.session_state["analysis_pending"] = False
-if "processing_signature" not in st.session_state:
-    st.session_state["processing_signature"] = None
+if "batch_results" not in st.session_state:
+    # signature -> {"filename": str, "result": dict | None, "error": str | None}
+    st.session_state["batch_results"] = {}
+if "batch_pending" not in st.session_state:
+    st.session_state["batch_pending"] = False
 
 st.title("Validador RUT DIAN")
-st.caption("Carga un PDF o imagen del RUT, decodifica el QR, consulta DIAN/MUISCA y compara los campos.")
+st.caption(
+    f"Carga hasta {MAX_FILES} PDF o imágenes de RUT, decodifica el QR, "
+    "consulta DIAN/MUISCA y compara los campos de cada uno."
+)
 
 with st.sidebar:
         logo_path = find_logo_path()
@@ -540,166 +468,136 @@ with st.sidebar:
 
 with st.container(border=True):
     st.markdown(
-        """
-        <div class="upload-section-title">Carga del documento</div>
+        f"""
+        <div class="upload-section-title">Carga de documentos</div>
         <div class="upload-section-copy">
-            Arrastra el PDF o imagen del RUT hasta el area punteada azul.
-            Tambien puedes usar el boton central para buscarlo en tu equipo.
-            Formatos permitidos: PDF, JPG o PNG. Tamano maximo: 10 MB.
+            Arrastra hasta {MAX_FILES} PDF o imágenes de RUT hasta el area punteada azul,
+            o usa el boton central para buscarlos en tu equipo.
+            Formatos permitidos: PDF, JPG o PNG. Tamano maximo: 10 MB por archivo.
         </div>
         """,
         unsafe_allow_html=True,
     )
-    uploaded = st.file_uploader(
-        "Arrastra o selecciona el documento RUT",
+    uploaded_files = st.file_uploader(
+        "Arrastra o selecciona uno o varios documentos RUT",
         type=["pdf", "jpg", "jpeg", "png"],
-        key=f"rut_file_{st.session_state['uploader_key']}",
+        accept_multiple_files=True,
+        key=f"rut_files_{st.session_state['uploader_key']}",
         label_visibility="collapsed",
     )
-    if uploaded:
-        st.markdown(
-            """
-            <style>
-            div[data-testid="stFileUploader"] {
-                display: none !important;
-            }
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
-        file_col, remove_col = st.columns([0.94, 0.06])
-        with file_col:
-            st.markdown(
-                f"""
-                <div class="uploaded-file-card">
-                    <div class="uploaded-file-icon">{file_type_label(uploaded.name)}</div>
-                    <div>
-                        <div class="uploaded-file-name">{html.escape(uploaded.name)}</div>
-                        <div class="uploaded-file-meta">{format_file_size(uploaded.size)} cargado correctamente</div>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-        with remove_col:
-            st.markdown('<div class="remove-upload-button">', unsafe_allow_html=True)
-            remove_uploaded = st.button("X", key=f"remove_uploaded_{st.session_state['uploader_key']}", help="Eliminar archivo")
-            st.markdown("</div>", unsafe_allow_html=True)
-        if remove_uploaded:
-            reset_upload_state()
-            st.rerun()
-file_bytes = uploaded.getvalue() if uploaded else None
-filename = uploaded.name if uploaded else None
-if uploaded and uploaded.size > 10 * 1024 * 1024:
-    st.error("El archivo excede el límite de 10 MB. Selecciona un archivo más pequeño.")
-    uploaded = None
-    file_bytes = None
-    filename = None
-    current_signature = None
-else:
-    current_signature = None
-    if uploaded and file_bytes is not None:
-        current_signature = json.dumps(
+
+if uploaded_files and len(uploaded_files) > MAX_FILES:
+    st.warning(
+        f"Se permiten máximo {MAX_FILES} documentos a la vez. "
+        f"Se usarán solo los primeros {MAX_FILES} de los {len(uploaded_files)} que subiste."
+    )
+    uploaded_files = uploaded_files[:MAX_FILES]
+
+# Cada item representa un archivo cargado con su "firma" (huella del contenido +
+# configuración). La firma es la llave para no reprocesar un archivo ya analizado
+# ni perder su resultado cuando Streamlit vuelve a ejecutar el script.
+items: list[dict] = []
+for uf in uploaded_files or []:
+    file_bytes = uf.getvalue()
+    oversized = uf.size > 10 * 1024 * 1024
+    signature = None
+    if not oversized:
+        signature = json.dumps(
             {
-                "file": file_fingerprint(file_bytes, filename or "rut.pdf"),
+                "file": file_fingerprint(file_bytes, uf.name),
                 "model": (model or "").strip(),
                 "prefer_browser": bool(prefer_browser),
             },
             sort_keys=True,
         )
+    items.append({
+        "filename": uf.name,
+        "size": uf.size,
+        "file_bytes": file_bytes,
+        "oversized": oversized,
+        "signature": signature,
+    })
 
-# Si el usuario cambia archivo/configuración después de un análisis, desbloqueamos el flujo.
-# Importante: no cancelar analysis_pending cuando acabamos de hacer clic en
-# "Analizar y comparar". En ese momento last_signature todavía es None o anterior,
-# pero processing_signature ya corresponde al documento actual y debe continuar.
-if (
-    current_signature
-    and current_signature != st.session_state.get("last_signature")
-    and current_signature != st.session_state.get("processing_signature")
-):
-    st.session_state["analysis_pending"] = False
-    st.session_state["processing_signature"] = None
+for it in items:
+    if it["oversized"]:
+        st.error(f"'{it['filename']}' excede el límite de 10 MB y no se incluirá en el análisis.")
 
-already_analyzed = bool(
-    uploaded
-    and st.session_state.get("last_result") is not None
-    and current_signature == st.session_state.get("last_signature")
-)
-
-is_processing = bool(
-    uploaded
-    and st.session_state.get("analysis_pending") is True
-    and current_signature == st.session_state.get("processing_signature")
-)
+valid_items = [it for it in items if not it["oversized"]]
+pending_items = [it for it in valid_items if it["signature"] not in st.session_state["batch_results"]]
 
 button_col1, button_col2 = st.columns([1, 1])
 with button_col1:
-    if is_processing:
+    if st.session_state["batch_pending"]:
         st.button("Verificación en curso...", type="primary", disabled=True)
-    elif already_analyzed:
-        # Después de analizar, ocultamos el botón principal para evitar reprocesar el mismo documento.
-        st.empty()
     else:
+        label = "Analizar y comparar" if len(valid_items) <= 1 else f"Analizar {len(pending_items)} documento(s)"
         run_clicked = st.button(
-            "Analizar y comparar",
+            label,
             type="primary",
-            disabled=uploaded is None or not api_key,
+            disabled=not pending_items or not api_key,
         )
         if run_clicked:
-            st.session_state["analysis_pending"] = True
-            st.session_state["processing_signature"] = current_signature
+            st.session_state["batch_pending"] = True
             st.rerun()
 
 with button_col2:
     clear = st.button(
         "Limpiar / subir otro documento",
-        disabled=uploaded is None and st.session_state.get("last_result") is None,
+        disabled=not items and not st.session_state["batch_results"],
     )
 
 if clear:
     reset_upload_state()
     st.rerun()
 
-if uploaded and not api_key:
-    st.warning("Pega tu OpenAI API key para habilitar el análisis.")
-elif is_processing:
-    st.info("La verificación ya inició. Espera a que termine o usa **Limpiar / subir otro documento** para cancelar visualmente y empezar de nuevo.")
-elif uploaded and already_analyzed:
-    st.info("Este documento ya fue analizado. Para iniciar un proceso nuevo, usa **Limpiar / subir otro documento**.")
-elif uploaded:
-    st.info("Archivo cargado. Haz clic en **Analizar y comparar**.")
-else:
-    st.info("Sube un PDF, JPG o PNG para iniciar la validación.")
+completed_items = [it for it in valid_items if it["signature"] in st.session_state["batch_results"]]
 
-if is_processing:
-    with st.spinner("Analizando documento, leyendo QR y consultando DIAN..."):
-        try:
-            result = validate_rut(
-                api_key=api_key.strip(),
-                model=model.strip(),
-                file_bytes=file_bytes,
-                filename=filename or "rut.pdf",
-                prefer_browser=prefer_browser,
-            )
-        except Exception as exc:
-            st.session_state["analysis_pending"] = False
-            st.session_state["processing_signature"] = None
-            show_analysis_error(exc)
-            st.stop()
-
-    st.session_state["last_result"] = result
-    st.session_state["last_signature"] = current_signature
-    st.session_state["last_filename"] = filename
-    st.session_state["analysis_pending"] = False
-    st.session_state["processing_signature"] = None
+if clear:
+    reset_upload_state()
     st.rerun()
+elif not items and not api_key:
+    st.info("Sube uno o varios PDF/JPG/PNG y pega tu OpenAI API key para iniciar la validación.")
+elif not items:
+    st.info(f"Sube hasta {MAX_FILES} PDF, JPG o PNG para iniciar la validación.")
+elif not api_key:
+    st.warning("Pega tu OpenAI API key para habilitar el análisis.")
+elif st.session_state["batch_pending"]:
+    st.info("La verificación ya inició. Espera a que termine.")
+elif pending_items:
+    st.info(f"{len(pending_items)} documento(s) listo(s). Haz clic en **Analizar** para procesarlos.")
+elif completed_items:
+    st.info("Todos los documentos cargados ya fueron analizados. Para empezar de nuevo usa **Limpiar / subir otro documento**.")
 
-result_to_show = None
-if uploaded and st.session_state.get("last_result") is not None and current_signature == st.session_state.get("last_signature"):
-    result_to_show = st.session_state["last_result"]
+if st.session_state["batch_pending"]:
+    remaining = [it for it in valid_items if it["signature"] not in st.session_state["batch_results"]]
+    if not remaining:
+        st.session_state["batch_pending"] = False
+    else:
+        total = len(remaining)
+        progress = st.progress(0.0, text=f"Analizando 1/{total}: {remaining[0]['filename']}...")
+        for i, it in enumerate(remaining, start=1):
+            progress.progress((i - 1) / total, text=f"Analizando {i}/{total}: {it['filename']}...")
+            try:
+                result = validate_rut(
+                    api_key=api_key.strip(),
+                    model=model.strip(),
+                    file_bytes=it["file_bytes"],
+                    filename=it["filename"],
+                    prefer_browser=True,
+                )
+                st.session_state["batch_results"][it["signature"]] = {
+                    "filename": it["filename"], "result": result, "error": None,
+                }
+            except Exception as exc:
+                st.session_state["batch_results"][it["signature"]] = {
+                    "filename": it["filename"], "result": None, "error": str(exc),
+                }
+            progress.progress(i / total)
+        st.session_state["batch_pending"] = False
+        st.rerun()
 
-if result_to_show:
-    result = result_to_show
+
+def render_result(result: dict, key_prefix: str) -> None:
     status = result.get("verification_status")
     same = result.get("same_information")
 
@@ -746,7 +644,7 @@ if result_to_show:
     )
 
     if result.get("qr_url"):
-        st.text_input("URL QR usada", value=result["qr_url"], disabled=True)
+        st.text_input("URL QR usada", value=result["qr_url"], disabled=True, key=f"qrurl_{key_prefix}")
 
     if result.get("notes"):
         notes_html = "<strong>Notas</strong><br>" + "<br>".join(f"• {note}" for note in result["notes"])
@@ -811,7 +709,6 @@ if result_to_show:
             table_html = build_comparison_table_html(comparison_rows)
             st.caption("Comparación campo por campo")
             st.markdown(table_html, unsafe_allow_html=True)
-            components.html(COPY_BUTTON_SCRIPT, height=0)
         else:
             st.info("No hay comparación disponible.")
 
@@ -842,6 +739,49 @@ if result_to_show:
         st.download_button(
             "Descargar resultado JSON",
             data=pretty.encode("utf-8"),
-            file_name="resultado_validacion_rut.json",
+            file_name=f"resultado_validacion_rut_{key_prefix}.json",
             mime="application/json",
+            key=f"download_{key_prefix}",
         )
+
+
+def outer_tab_label(filename: str, entry: dict) -> str:
+    if entry.get("error"):
+        icon = "❌"
+    else:
+        result = entry.get("result") or {}
+        title, _, _ = status_label_for_verification(
+            result.get("verification_status"), result.get("same_information")
+        )
+        icon = title.split(" ", 1)[0]
+    short_name = filename if len(filename) <= 22 else filename[:19] + "..."
+    return f"{icon} {short_name}"
+
+
+if completed_items:
+    # El script del botón de copiar se inyecta una sola vez: instala un
+    # listener delegado sobre el documento padre, así que no hace falta
+    # repetirlo por cada documento/pestaña.
+    components.html(COPY_BUTTON_SCRIPT, height=0)
+
+    if len(completed_items) == 1:
+        it = completed_items[0]
+        entry = st.session_state["batch_results"][it["signature"]]
+        if entry["error"]:
+            show_analysis_error(entry["error"])
+        else:
+            render_result(entry["result"], key_prefix="unico")
+    else:
+        outer_labels = [
+            outer_tab_label(it["filename"], st.session_state["batch_results"][it["signature"]])
+            for it in completed_items
+        ]
+        outer_tabs = st.tabs(outer_labels)
+        for idx, (outer_tab, it) in enumerate(zip(outer_tabs, completed_items), start=1):
+            with outer_tab:
+                entry = st.session_state["batch_results"][it["signature"]]
+                st.caption(f"📄 {it['filename']}")
+                if entry["error"]:
+                    show_analysis_error(entry["error"])
+                else:
+                    render_result(entry["result"], key_prefix=f"doc{idx}")
