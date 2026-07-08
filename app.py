@@ -655,6 +655,7 @@ def render_result(result: dict, key_prefix: str) -> None:
     comparisons = result.get("comparisons") or []
     previews = result.get("previews") or {}
     document_pages_png = previews.get("document_pages_png") or []
+    document_pages_highlighted_png = previews.get("document_pages_highlighted_png")
     dian_screenshot_png = previews.get("dian_screenshot_png")
 
     tab_preview, tab1, tab2, tab3, tab4 = st.tabs(
@@ -670,9 +671,14 @@ def render_result(result: dict, key_prefix: str) -> None:
         col_doc, col_dian = st.columns(2)
         with col_doc:
             st.markdown("**📄 Documento cargado**")
-            if document_pages_png:
-                for i, png in enumerate(document_pages_png):
-                    caption = f"Página {i + 1}" if len(document_pages_png) > 1 else None
+            # Si se pudo resaltar (solo PDFs de texto), se muestra esa versión con
+            # los campos a revisar en amarillo; si no, la imagen normal.
+            pages_to_show = document_pages_highlighted_png or document_pages_png
+            if document_pages_highlighted_png:
+                st.caption("🟡 En amarillo: nombre/razón social, NIT, DV y códigos de responsabilidad.")
+            if pages_to_show:
+                for i, png in enumerate(pages_to_show):
+                    caption = f"Página {i + 1}" if len(pages_to_show) > 1 else None
                     st.image(png, use_container_width=True, caption=caption)
             else:
                 st.info("No hay previsualización del documento.")
