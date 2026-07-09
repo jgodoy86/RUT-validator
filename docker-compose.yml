@@ -6,6 +6,12 @@ services:
     # Chromium se cae con "Target crashed" si /dev/shm es muy pequeño (64 MB
     # por defecto en Docker); Playwright necesita más para renderizar DIAN.
     shm_size: "1gb"
+    volumes:
+      # Persiste el .env del host dentro del contenedor. Sin esto, la API key
+      # que se guarda desde la barra lateral se escribe en el .env interno del
+      # contenedor y se pierde en cada reconstrucción (docker compose build).
+      # Montado, la clave queda en el archivo del servidor y sobrevive updates.
+      - ./.env:/app/.env
     networks: [internal]
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')"]

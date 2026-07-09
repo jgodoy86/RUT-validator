@@ -14,7 +14,7 @@ import cv2
 import fitz
 import numpy as np
 import requests
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from prompts import DOCUMENT_PROMPT, DIAN_PAGE_PROMPT
 from schemas import DOCUMENT_EXTRACTION_SCHEMA, DIAN_PAGE_EXTRACTION_SCHEMA
@@ -125,6 +125,106 @@ def render_file_to_images(file_bytes: bytes, filename: str, max_pages: int = 3, 
             images.append(img)
         return images
     return [Image.open(io.BytesIO(file_bytes)).convert("RGB")]
+
+
+def _nit_search_variants(nit: Any) -> List[str]:
+    """Variantes de un NIT para localizarlo en el PDF: crudo y con puntos de
+    miles (901234567 -> 901.234.567), que es como suele mostrarlo la DIAN."""
+    digits = re.sub(r"\D+", "", str(nit or ""))
+    if len(digits) < 5:  # muy corto -> ambiguo, no vale la pena buscarlo
+        return []
+    variants = [digits]
+    # Agrupar de a 3 desde la derecha para el formato con puntos.
+    rev = digits[::-1]
+    dotted = ".".join(rev[i:i + 3] for i in range(0, len(rev), 3))[::-1]
+    if dotted != digits:
+        variants.append(dotted)
+    return variants
+
+
+def highlight_document_fields(
+    file_bytes: bytes, filename: str, document_fields: Dict[str, Any], max_pages: int = 3, zoom: float = 2.5
+) -> Optional[List[bytes]]:
+    """Resalta en amarillo, sobre el PDF renderizado, los campos que el gestor
+    debe revisar: nombre/razón social, NIT, DV y los códigos de responsabilidad.
+
+    Solo funciona con PDFs de texto (los RUT de la DIAN lo son). Para imágenes
+    (JPG/PNG) no hay capa de texto y devuelve None. Diseñado para NO resaltar
+    nunca de más: si un valor es ambiguo o no se ubica con certeza, se omite.
+    """
+    is_pdf = Path(filename).suffix.lower() == ".pdf" or guess_mime_type(filename) == "application/pdf"
+    if not is_pdf:
+        return None
+    try:
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+    except Exception:
+        return None
+
+    fields = document_fields or {}
+    razon = normalize_value(fields.get("razon_social"))
+    nit_variants = _nit_search_variants(fields.get("nit"))
+    dv_value = re.sub(r"\D+", "", str(fields.get("dv") or ""))
+    codes = set()
+    for item in fields.get("responsabilidades") or []:
+        if isinstance(item, dict) and item.get("codigo"):
+            c = re.sub(r"\D+", "", str(item.get("codigo")))
+            if c:
+                codes.add(c.zfill(2))
+
+    YELLOW = (255, 235, 59, 110)
+    out: List[bytes] = []
+    for i in range(min(max_pages, doc.page_count)):
+        page = doc.load_page(i)
+        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+        base = Image.frombytes("RGB", [pix.width, pix.height], pix.samples).convert("RGBA")
+        overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+
+        def box(x0: float, y0: float, x1: float, y1: float) -> None:
+            draw.rectangle([x0 * zoom, y0 * zoom, x1 * zoom, y1 * zoom], fill=YELLOW)
+
+        words = page.get_text("words")  # (x0,y0,x1,y1, palabra, block, line, word_no)
+
+        # Razón social / nombre y NIT: se buscan por su valor exacto y solo se
+        # resaltan si aparecen UNA sola vez (inequívoco) para no marcar de más.
+        for needle in [n for n in [razon] if n and len(n) >= 4] + nit_variants:
+            rects = page.search_for(needle)
+            if len(rects) == 1:
+                r = rects[0]
+                box(r.x0, r.y0, r.x1, r.y1)
+                if needle in nit_variants:  # ya ubicado el NIT, no probar más variantes
+                    nit_variants = []
+
+        # DV: dígito(s) inmediatamente a la derecha de la etiqueta "DV".
+        if dv_value:
+            for (x0, y0, x1, y1, w, b, l, n) in words:
+                if w.rstrip(":.").upper() == "DV":
+                    same_line = sorted(
+                        [ww for ww in words if ww[5] == b and ww[6] == l and ww[7] > n],
+                        key=lambda t: t[7],
+                    )
+                    if same_line and re.sub(r"\D+", "", same_line[0][4]) == dv_value:
+                        nxt = same_line[0]
+                        box(nxt[0], nxt[1], nxt[2], nxt[3])
+                    break
+
+        # Códigos de responsabilidad: solo tokens que coinciden con un código
+        # extraído Y están dentro de la banda de la casilla "Responsabilidades",
+        # para no confundirlos con números de dirección/teléfono en otras zonas.
+        if codes:
+            resp_label_y = None
+            for (x0, y0, x1, y1, w, *_rest) in words:
+                if "responsabilidad" in w.lower():
+                    resp_label_y = y1
+                    break
+            if resp_label_y is not None:
+                for (x0, y0, x1, y1, w, *_rest) in words:
+                    if y0 >= resp_label_y and y0 <= resp_label_y + 120 and w.zfill(2) in codes:
+                        box(x0, y0, x1, y1)
+
+        merged = Image.alpha_composite(base, overlay).convert("RGB")
+        out.append(pil_to_png_bytes(merged))
+    return out
 
 
 def image_bytes_to_pil(file_bytes: bytes) -> Image.Image:
@@ -375,6 +475,30 @@ def compare_responsabilidades(document_fields: Dict[str, Any], page_fields: Dict
     }
 
 
+def check_obligado_facturar_electronica(document_fields: Dict[str, Any]) -> Dict[str, Any]:
+    """Código de responsabilidad 52 = obligado a facturar electrónicamente
+    (confirmado con el equipo de Contabilidad, no es una inferencia propia)."""
+    codes: set = set()
+    items = document_fields.get("responsabilidades")
+    if isinstance(items, list):
+        for item in items:
+            if isinstance(item, dict) and item.get("codigo"):
+                c = normalize_numeric(item.get("codigo"))
+                if c:
+                    codes.add(c.zfill(2))
+    obligado = "52" in codes
+    return {
+        "obligado": obligado,
+        "codigo": "52",
+        "message": (
+            "El RUT incluye el código de responsabilidad 52: obligado a facturar electrónicamente."
+            if obligado
+            else "No se encontró el código de responsabilidad 52 en el RUT extraído. "
+            "Verifica manualmente si aplica, especialmente si la extracción del documento tuvo advertencias."
+        ),
+    }
+
+
 def normalize_watermark_text(value: Any) -> str:
     if value is None:
         return ""
@@ -495,6 +619,13 @@ def validate_rut(api_key: str, model: str, file_bytes: bytes, filename: str, pre
     watermark_validation = validate_document_watermark(doc_fields)
     qr_url_ai = document_extraction.get("qr_url_detected_by_ai")
     qr_url = (qr_url_local or qr_url_ai or "").strip() or None
+    # Resaltado de los campos a revisar (nombre, NIT, DV, códigos) sobre el PDF.
+    # Devuelve None para imágenes (sin capa de texto); si algo falla, no bloquea
+    # el análisis: simplemente no habrá versión resaltada.
+    try:
+        document_pages_highlighted_png = highlight_document_fields(file_bytes, filename, doc_fields)
+    except Exception:
+        document_pages_highlighted_png = None
     result: Dict[str, Any] = {
         "ok": True,
         "filename": filename,
@@ -503,23 +634,35 @@ def validate_rut(api_key: str, model: str, file_bytes: bytes, filename: str, pre
         "qr_url_local_opencv": qr_url_local,
         "qr_url_detected_by_ai": qr_url_ai,
         "document_extraction": document_extraction,
+        "obligado_facturar_electronica": check_obligado_facturar_electronica(doc_fields),
         "previews": {
             "document_pages_png": document_pages_png,
+            "document_pages_highlighted_png": document_pages_highlighted_png,
             "dian_screenshot_png": None,
         },
     }
     if not qr_url:
         invalid_draft = bool(watermark_validation.get("is_draft"))
+        # Sin QR no hay con qué comparar en DIAN, pero igual se muestran todos
+        # los campos ya extraídos del documento (compare_simple_fields con
+        # page_fields vacío marca cada uno como "only_in_document").
+        doc_only_comparisons = compare_simple_fields(doc_fields, {})
+        doc_only_comparisons.append(compare_responsabilidades(doc_fields, {}))
+        doc_only_comparisons.append(build_watermark_comparison(watermark_validation))
         result.update({
             "qr_page_accessible": False,
             "verification_status": "invalid_document" if invalid_draft else "qr_unavailable",
             "same_information": False if invalid_draft else None,
             "dian_page_extraction": None,
             "document_watermark_validation": watermark_validation,
-            "comparisons": [build_watermark_comparison(watermark_validation)],
+            "comparisons": doc_only_comparisons,
             "match_count": 0,
             "difference_count": 0,
-            "notes": ["No se pudo decodificar QR. Sube una imagen mas nitida o un PDF con el QR visible."],
+            "notes": [
+                "No se pudo decodificar el QR ni consultar DIAN. Se muestran los campos "
+                "extraídos del documento sin comparar contra la página oficial; revisa "
+                "manualmente contra la DIAN si necesitas certeza total."
+            ],
         })
         if invalid_draft:
             result["notes"].insert(0, watermark_validation.get("message") or "Documento con marca de agua de borrador.")
