@@ -169,6 +169,13 @@ def highlight_document_fields(
 
     fields = document_fields or {}
     razon = normalize_value(fields.get("razon_social"))
+    # Partes del nombre (personas naturales): el nombre compuesto no existe
+    # contiguo en el PDF (casillas separadas), así que se resalta cada una.
+    name_parts = [
+        normalize_value(fields.get(k))
+        for k in ("primer_apellido", "segundo_apellido", "primer_nombre", "otros_nombres")
+    ]
+    name_parts = [p for p in name_parts if p and len(p) >= 3]
     nit_variants = _nit_search_variants(fields.get("nit"))
     dv_value = re.sub(r"\D+", "", str(fields.get("dv") or ""))
     codes = set()
@@ -192,15 +199,21 @@ def highlight_document_fields(
 
         words = page.get_text("words")  # (x0,y0,x1,y1, palabra, block, line, word_no)
 
-        # Razón social / nombre y NIT: se buscan por su valor exacto y solo se
-        # resaltan si aparecen UNA sola vez (inequívoco) para no marcar de más.
-        for needle in [n for n in [razon] if n and len(n) >= 4] + nit_variants:
+        # Razón social (empresa), partes del nombre (persona natural) y NIT: se
+        # buscan por su valor exacto y solo se resaltan si aparecen UNA sola vez
+        # (inequívoco) para no marcar de más.
+        text_needles = [n for n in [razon] if n and len(n) >= 4] + name_parts
+        for needle in text_needles:
             rects = page.search_for(needle)
             if len(rects) == 1:
                 r = rects[0]
                 box(r.x0, r.y0, r.x1, r.y1)
-                if needle in nit_variants:  # ya ubicado el NIT, no probar más variantes
-                    nit_variants = []
+        for needle in nit_variants:
+            rects = page.search_for(needle)
+            if len(rects) == 1:
+                r = rects[0]
+                box(r.x0, r.y0, r.x1, r.y1)
+                break  # ya ubicado el NIT, no probar más variantes
 
         # DV: dígito(s) inmediatamente a la derecha de la etiqueta "DV".
         if dv_value:
@@ -422,6 +435,27 @@ def comparable(field: str, value: Any) -> Optional[str]:
     if field in {"nit", "dv", "telefono_1", "actividad_economica_principal", "numero_formulario"}:
         return normalize_numeric(value)
     return normalize_value(value)
+
+
+def apply_persona_natural_name(fields: Dict[str, Any]) -> Dict[str, Any]:
+    """Para personas naturales la casilla 35 'Razón social' va vacía y el nombre
+    está en 31-34. La DIAN, en cambio, muestra el nombre completo como 'Razón
+    social'. Si razon_social está vacío pero hay partes del nombre, se compone
+    en el mismo orden que usa la DIAN (apellidos + nombres) para que la
+    comparación coincida. No pisa una razon_social ya presente (empresas).
+    """
+    if not isinstance(fields, dict):
+        return fields
+    if normalize_value(fields.get("razon_social")):
+        return fields
+    partes = [
+        fields.get("primer_apellido"), fields.get("segundo_apellido"),
+        fields.get("primer_nombre"), fields.get("otros_nombres"),
+    ]
+    nombre = " ".join(p.strip() for p in partes if isinstance(p, str) and p.strip())
+    if nombre:
+        fields["razon_social"] = nombre
+    return fields
 
 
 def compare_simple_fields(document_fields: Dict[str, Any], page_fields: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -727,6 +761,9 @@ def validate_rut(api_key: str, model: str, file_bytes: bytes, filename: str, pre
     qr_url_local = decode_qr_from_images(images)
     document_extraction = analyze_document_with_openai(api_key, model, file_bytes, filename)
     doc_fields = document_extraction.get("document_fields") or {}
+    # Personas naturales: componer razon_social desde las casillas de nombre
+    # (31-34) para poder compararla contra el nombre que muestra la DIAN.
+    apply_persona_natural_name(doc_fields)
     watermark_validation = validate_document_watermark(doc_fields)
     qr_url_ai = document_extraction.get("qr_url_detected_by_ai")
     qr_url = (qr_url_local or qr_url_ai or "").strip() or None
@@ -797,6 +834,9 @@ def validate_rut(api_key: str, model: str, file_bytes: bytes, filename: str, pre
         "has_screenshot": bool(fetch.screenshot_png),
     }
     page_extraction = analyze_dian_page_with_openai(api_key, model, fetch)
+    # Por consistencia: si la DIAN llegara a devolver el nombre en casillas
+    # separadas en vez de razon_social, se compone igual.
+    apply_persona_natural_name(page_extraction.get("page_fields") or {})
     qr_page_loaded = bool(fetch.accessible and page_extraction.get("page_loaded"))
     comparison = compare_results(document_extraction, page_extraction, qr_page_loaded, qr_url)
     result.update(comparison)
