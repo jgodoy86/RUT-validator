@@ -5,10 +5,17 @@ import mimetypes
 import re
 import unicodedata
 from dataclasses import dataclass
+from datetime import datetime
 from html import unescape
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
+
+try:
+    from zoneinfo import ZoneInfo
+    COLOMBIA_TZ: Optional["ZoneInfo"] = ZoneInfo("America/Bogota")
+except Exception:
+    COLOMBIA_TZ = None
 
 import cv2
 import fitz
@@ -499,6 +506,103 @@ def check_obligado_facturar_electronica(document_fields: Dict[str, Any]) -> Dict
     }
 
 
+# Formatos observados/esperados para "Fecha de generación documento PDF" en
+# el RUT de la DIAN. DD-MM-AAAA es el orden colombiano; se incluyen también
+# variantes con "/" y formato AAAA-MM-DD por si acaso, sin asumir uno solo.
+_GENERATION_DATE_FORMATS = [
+    "%d-%m-%Y %I:%M:%S%p",
+    "%d-%m-%Y %H:%M:%S",
+    "%d/%m/%Y %I:%M:%S%p",
+    "%d/%m/%Y %H:%M:%S",
+    "%d-%m-%Y",
+    "%d/%m/%Y",
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%d",
+]
+
+
+def _parse_generation_date(raw: Any) -> Optional[datetime]:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    # Normaliza variantes de AM/PM ("a.m.", "a. m.", "am" en minúsculas, con
+    # o sin espacio) a la forma exacta "AM"/"PM" que espera %p.
+    normalized = re.sub(
+        r"\s*([AaPp])\.?\s*[Mm]\.?\s*$",
+        lambda m: m.group(1).upper() + "M",
+        text,
+    )
+    for fmt in _GENERATION_DATE_FORMATS:
+        try:
+            return datetime.strptime(normalized, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def validate_generation_date(document_fields: Dict[str, Any], now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Verifica 'fecha_generacion_pdf': no puede ser posterior al momento
+    actual (imposible en un documento legítimo -> fuerte señal de
+    adulteración) ni de un año distinto al actual (política de vigencia).
+
+    Principio de diseño: si la fecha no se pudo extraer o interpretar, NO se
+    marca como inválida (evita falsos positivos); solo se avisa que no se
+    pudo verificar.
+    """
+    raw = document_fields.get("fecha_generacion_pdf")
+    if now is None:
+        now = datetime.now(COLOMBIA_TZ) if COLOMBIA_TZ else datetime.utcnow()
+    now_naive = now.replace(tzinfo=None) if now.tzinfo is not None else now
+
+    if not raw:
+        return {
+            "field": "fecha_generacion_pdf", "document_value": None, "status": "missing",
+            "is_invalid": False,
+            "message": "No se extrajo la fecha de generación del documento.",
+        }
+    parsed = _parse_generation_date(raw)
+    if parsed is None:
+        return {
+            "field": "fecha_generacion_pdf", "document_value": raw, "status": "unparseable",
+            "is_invalid": False,
+            "message": f"No se pudo interpretar la fecha de generación ({raw!r}); revísala manualmente.",
+        }
+    if parsed > now_naive:
+        return {
+            "field": "fecha_generacion_pdf", "document_value": raw, "status": "future_date",
+            "is_invalid": True,
+            "message": (
+                f"La fecha de generación ({raw}) es POSTERIOR a la fecha/hora actual "
+                f"({now_naive.strftime('%d-%m-%Y %H:%M:%S')}). Esto es imposible en un "
+                "documento legítimo y es una señal fuerte de adulteración."
+            ),
+        }
+    if parsed.year != now_naive.year:
+        return {
+            "field": "fecha_generacion_pdf", "document_value": raw, "status": "wrong_year",
+            "is_invalid": True,
+            "message": (
+                f"La fecha de generación ({raw}) no corresponde al año en curso "
+                f"({now_naive.year}); el documento no está vigente, solicita uno actualizado."
+            ),
+        }
+    return {
+        "field": "fecha_generacion_pdf", "document_value": raw, "status": "ok",
+        "is_invalid": False,
+        "message": "La fecha de generación es coherente con la fecha y el año actuales.",
+    }
+
+
+def build_generation_date_comparison(validation: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "field": "fecha_generacion_documento",
+        "document_value": validation.get("document_value"),
+        "qr_page_value": None,
+        "status": validation.get("status"),
+        "message": validation.get("message"),
+    }
+
+
 def normalize_watermark_text(value: Any) -> str:
     if value is None:
         return ""
@@ -572,16 +676,22 @@ def compare_results(document_extraction: Dict[str, Any], page_extraction: Dict[s
     doc_fields = document_extraction.get("document_fields") or {}
     page_fields = page_extraction.get("page_fields") or {}
     watermark_validation = validate_document_watermark(doc_fields)
+    generation_date_validation = validate_generation_date(doc_fields)
     comparisons = compare_simple_fields(doc_fields, page_fields)
     comparisons.append(compare_responsabilidades(doc_fields, page_fields))
     comparisons.append(build_watermark_comparison(watermark_validation))
+    comparisons.append(build_generation_date_comparison(generation_date_validation))
     comparisons.append(build_qr_page_comparison(qr_page_loaded, qr_url))
     differences = [r for r in comparisons if r["status"] in {"different", "invalid_qr_page"}]
     matches = [r for r in comparisons if r["status"] == "match"]
     invalid_draft = bool(watermark_validation.get("is_draft"))
+    invalid_generation_date = bool(generation_date_validation.get("is_invalid"))
     invalid_qr_page = not qr_page_loaded
 
     if invalid_draft:
+        verification_status = "invalid_document"
+        same_information = False
+    elif invalid_generation_date:
         verification_status = "invalid_document"
         same_information = False
     elif invalid_qr_page:
@@ -601,6 +711,7 @@ def compare_results(document_extraction: Dict[str, Any], page_extraction: Dict[s
         "verification_status": verification_status,
         "same_information": same_information,
         "document_watermark_validation": watermark_validation,
+        "document_generation_date_validation": generation_date_validation,
         "comparisons": comparisons,
         "match_count": len(matches),
         "difference_count": len(differences),
@@ -642,19 +753,24 @@ def validate_rut(api_key: str, model: str, file_bytes: bytes, filename: str, pre
         },
     }
     if not qr_url:
+        generation_date_validation = validate_generation_date(doc_fields)
         invalid_draft = bool(watermark_validation.get("is_draft"))
+        invalid_generation_date = bool(generation_date_validation.get("is_invalid"))
+        invalid_document = invalid_draft or invalid_generation_date
         # Sin QR no hay con qué comparar en DIAN, pero igual se muestran todos
         # los campos ya extraídos del documento (compare_simple_fields con
         # page_fields vacío marca cada uno como "only_in_document").
         doc_only_comparisons = compare_simple_fields(doc_fields, {})
         doc_only_comparisons.append(compare_responsabilidades(doc_fields, {}))
         doc_only_comparisons.append(build_watermark_comparison(watermark_validation))
+        doc_only_comparisons.append(build_generation_date_comparison(generation_date_validation))
         result.update({
             "qr_page_accessible": False,
-            "verification_status": "invalid_document" if invalid_draft else "qr_unavailable",
-            "same_information": False if invalid_draft else None,
+            "verification_status": "invalid_document" if invalid_document else "qr_unavailable",
+            "same_information": False if invalid_document else None,
             "dian_page_extraction": None,
             "document_watermark_validation": watermark_validation,
+            "document_generation_date_validation": generation_date_validation,
             "comparisons": doc_only_comparisons,
             "match_count": 0,
             "difference_count": 0,
@@ -664,6 +780,8 @@ def validate_rut(api_key: str, model: str, file_bytes: bytes, filename: str, pre
                 "manualmente contra la DIAN si necesitas certeza total."
             ],
         })
+        if invalid_generation_date:
+            result["notes"].insert(0, generation_date_validation.get("message") or "Fecha de generación inválida.")
         if invalid_draft:
             result["notes"].insert(0, watermark_validation.get("message") or "Documento con marca de agua de borrador.")
         return result
@@ -686,8 +804,11 @@ def validate_rut(api_key: str, model: str, file_bytes: bytes, filename: str, pre
     result["dian_page_extraction"] = page_extraction
     notes: List[str] = []
     watermark_validation = result.get("document_watermark_validation") or {}
+    generation_date_validation = result.get("document_generation_date_validation") or {}
     if watermark_validation.get("is_draft"):
         notes.append(watermark_validation.get("message") or "Documento con marca de agua de borrador.")
+    if generation_date_validation.get("is_invalid"):
+        notes.append(generation_date_validation.get("message") or "Fecha de generación inválida.")
     if fetch.error:
         notes.append(f"DIAN fetch error: {fetch.error}")
     if not qr_page_loaded:

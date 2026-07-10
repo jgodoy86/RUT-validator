@@ -384,6 +384,20 @@ def build_comparison_table_html(rows: list[dict]) -> str:
             else:
                 background = "#f8d7da"
                 status = "❌ Texto inválido"
+        if row["Campo"] == "fecha_generacion_documento":
+            raw_status = row.get("RawStatus")
+            if raw_status == "future_date":
+                background = "#f8d7da"
+                status = "❌ Fecha futura"
+            elif raw_status == "wrong_year":
+                background = "#f8d7da"
+                status = "❌ Año anterior"
+            elif raw_status == "ok":
+                background = "#d4edda"
+                status = "✅ Vigente"
+            else:
+                background = "#e2e3e5"
+                status = "— Sin verificar"
         body.append(
             "<tr>"
             f"<td style='padding:0.6rem 0.75rem; border-bottom:1px solid #e5e7eb;'>{html.escape(row['Campo'])}</td>"
@@ -602,6 +616,7 @@ def render_result(result: dict, key_prefix: str) -> None:
     same = result.get("same_information")
 
     watermark = result.get("document_watermark_validation") or {}
+    generation_date = result.get("document_generation_date_validation") or {}
     title, banner_type, detail_message = status_label_for_verification(status, same)
 
     status_color = {
@@ -622,7 +637,10 @@ def render_result(result: dict, key_prefix: str) -> None:
     )
 
     if banner_type == "error":
-        st.error(watermark.get("message") or "Documento inválido por marca de agua.")
+        if generation_date.get("is_invalid"):
+            st.error(generation_date.get("message") or "Fecha de generación del documento inválida.")
+        else:
+            st.error(watermark.get("message") or "Documento inválido por marca de agua.")
     elif banner_type == "success":
         st.success("La información verificada coincide con lo recuperado desde el QR.")
     elif banner_type == "warning":
@@ -632,7 +650,7 @@ def render_result(result: dict, key_prefix: str) -> None:
 
     obligado_fe = result.get("obligado_facturar_electronica") or {}
 
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("Estado", title)
     c2.metric("Coincide", "Sí" if same is True else ("No" if same is False else "No concluyente"))
     c3.metric("Fuente QR", result.get("qr_url_source") or "no detectado")
@@ -641,6 +659,18 @@ def render_result(result: dict, key_prefix: str) -> None:
         "Factura electrónica",
         "Obligado (cód. 52)" if obligado_fe.get("obligado") else "No registra cód. 52",
         help=obligado_fe.get("message"),
+    )
+    generation_date_labels = {
+        "future_date": "⚠️ Fecha futura",
+        "wrong_year": "⚠️ Año anterior",
+        "ok": "Vigente",
+        "missing": "sin dato",
+        "unparseable": "no interpretable",
+    }
+    c6.metric(
+        "Fecha generación",
+        generation_date_labels.get(generation_date.get("status"), "sin validar"),
+        help=generation_date.get("message"),
     )
 
     if result.get("qr_url"):
@@ -721,6 +751,8 @@ def render_result(result: dict, key_prefix: str) -> None:
     with tab2:
         st.subheader("Validación de marca de agua")
         st.json(result.get("document_watermark_validation") or {})
+        st.subheader("Validación de fecha de generación")
+        st.json(result.get("document_generation_date_validation") or {})
         st.subheader("Campos extraídos del documento")
         st.json(doc_fields)
         warnings = (result.get("document_extraction") or {}).get("warnings") or []
