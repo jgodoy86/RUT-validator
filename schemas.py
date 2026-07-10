@@ -3,7 +3,9 @@ DOCUMENT_FIELDS_SCHEMA = {
     "additionalProperties": False,
     "required": [
         "numero_formulario", "tipo_tramite", "nit", "dv", "direccion_seccional",
-        "tipo_contribuyente", "razon_social", "pais", "departamento", "ciudad_municipio",
+        "tipo_contribuyente", "razon_social",
+        "primer_apellido", "segundo_apellido", "primer_nombre", "otros_nombres",
+        "pais", "departamento", "ciudad_municipio",
         "direccion_principal", "correo_electronico", "telefono_1",
         "actividad_economica_principal", "fecha_inicio_actividad", "fecha_generacion_pdf",
         "responsabilidades", "marcas_agua"
@@ -16,6 +18,10 @@ DOCUMENT_FIELDS_SCHEMA = {
         "direccion_seccional": {"type": ["string", "null"]},
         "tipo_contribuyente": {"type": ["string", "null"]},
         "razon_social": {"type": ["string", "null"]},
+        "primer_apellido": {"type": ["string", "null"]},
+        "segundo_apellido": {"type": ["string", "null"]},
+        "primer_nombre": {"type": ["string", "null"]},
+        "otros_nombres": {"type": ["string", "null"]},
         "pais": {"type": ["string", "null"]},
         "departamento": {"type": ["string", "null"]},
         "ciudad_municipio": {"type": ["string", "null"]},

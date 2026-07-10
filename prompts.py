@@ -5,6 +5,11 @@ Lee el PDF o imagen adjunto y extrae solamente la información visible.
 Reglas:
 - No inventes datos.
 - Si un campo no se ve con claridad, usa null.
+- Para personas naturales, la casilla 35 "Razón social" suele ir vacía y el
+  nombre está en casillas separadas: 31 Primer apellido, 32 Segundo apellido,
+  33 Primer nombre, 34 Otros nombres. Extrae cada una en su campo
+  (primer_apellido, segundo_apellido, primer_nombre, otros_nombres). Para
+  personas jurídicas (empresas) esas casillas van vacías y se usa razon_social.
 - Extrae los códigos y descripciones de responsabilidades si aparecen.
 - Identifica marcas de agua o leyendas visibles, especialmente textos diagonales como "DOCUMENTO BORRADOR SIN COSTO".
 - Si ves la palabra BORRADOR en una marca de agua o leyenda, inclúyela exactamente en marcas_agua.
